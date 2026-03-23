@@ -17,7 +17,8 @@ from datetime import datetime
 import pandas as pd
 
 from api      import (fetch_weather, fetch_weather_by_coords,
-                       get_all_city_matches, get_weather_emoji, get_wind_direction)
+                       get_all_city_matches, get_weather_emoji, get_wind_direction,
+                       fetch_historical_weather)
 from storage  import save_weather, load_all_data, get_all_cities, get_record_count
 from analysis import (
     get_hottest_day, get_coldest_day, compare_cities,
@@ -57,11 +58,12 @@ MF_BIG    = ("Segoe UI", 22, "bold")
 
 # Sidebar navigation items: (label, icon)
 NAV_ITEMS = [
-    ("Current Weather",  "🌤"),
-    ("Compare Cities",   "⚖"),
-    ("Trends & Charts",  "📈"),
-    ("Analysis",         "📊"),
-    ("Data Log",         "🗃"),
+    ("Current Weather",     "🌤"),
+    ("Compare Cities",      "⚖"),
+    ("Trends & Charts",     "📈"),
+    ("Analysis",            "📊"),
+    ("Data Log",            "🗃"),
+    ("Historical Weather",  "📅"),
 ]
 
 
@@ -347,6 +349,7 @@ class ModernWeatherApp:
             self._build_page_trends,
             self._build_page_analysis,
             self._build_page_datalog,
+            self._build_page_history,
         ]
         for build_fn in builders:
             page = tk.Frame(container, bg=M_BG)
@@ -1180,6 +1183,193 @@ class ModernWeatherApp:
                 row.get("wind_speed", ""),
                 row.get("condition",  ""),
             ))
+
+    # =========================================================================
+    # ── PAGE 6: Historical Weather ────────────────────────────────────────────
+    # =========================================================================
+
+    def _build_page_history(self, page):
+        """Build the Historical Weather page (Open-Meteo Archive API)."""
+        from datetime import date as _date, timedelta
+
+        # ── Page header ───────────────────────────────────────────────────
+        hdr = tk.Frame(page, bg=M_SURFACE, height=56)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        tk.Label(hdr, text="📅  Historical Weather by Date",
+                 font=MF_TITLE, bg=M_SURFACE, fg=M_ACCENT, anchor="w"
+                 ).pack(side="left", padx=24, pady=10)
+        tk.Label(hdr, text="Powered by Open-Meteo Archive API  •  Free, no API key required",
+                 font=MF_SMALL, bg=M_SURFACE, fg=M_TEXT2, anchor="e"
+                 ).pack(side="right", padx=18)
+
+        # ── Input card ────────────────────────────────────────────────────
+        inp_card = tk.Frame(page, bg=M_SURFACE2, padx=24, pady=18)
+        inp_card.pack(fill="x", padx=24, pady=(14, 6))
+
+        # Row 1: labels
+        lbl_row = tk.Frame(inp_card, bg=M_SURFACE2)
+        lbl_row.pack(fill="x")
+        tk.Label(lbl_row, text="City name  (optionally: City, CC)",
+                 font=MF_SMALL, bg=M_SURFACE2, fg=M_TEXT2
+                 ).pack(side="left", padx=(0, 0))
+        tk.Label(lbl_row, text="Date",
+                 font=MF_SMALL, bg=M_SURFACE2, fg=M_TEXT2
+                 ).pack(side="left", padx=(220, 0))
+
+        # Row 2: entries + button
+        entry_row = tk.Frame(inp_card, bg=M_SURFACE2)
+        entry_row.pack(fill="x", pady=(4, 0))
+
+        style = ttk.Style()
+        style.configure("Hist.TEntry", fieldbackground=M_BG,
+                        foreground=M_TEXT, insertcolor=M_TEXT)
+
+        self._h_city_var = tk.StringVar()
+        ttk.Entry(entry_row, textvariable=self._h_city_var,
+                  font=MF_BODY, width=28, style="Hist.TEntry"
+                  ).pack(side="left", ipady=5, padx=(0, 16))
+
+        self._h_date_var = tk.StringVar(
+            value=(_date.today() - timedelta(days=1)).isoformat()
+        )
+        ttk.Entry(entry_row, textvariable=self._h_date_var,
+                  font=MF_BODY, width=14, style="Hist.TEntry"
+                  ).pack(side="left", ipady=5, padx=(0, 16))
+
+        self._h_btn = tk.Button(
+            entry_row,
+            text="🔍  Fetch History",
+            font=MF_HEAD,
+            bg=M_SEL, fg=M_TEXT,
+            activebackground=M_ACCENT, activeforeground=M_TEXT,
+            relief="flat", padx=18, pady=6, cursor="hand2",
+            command=self._hist_fetch
+        )
+        self._h_btn.pack(side="left")
+
+        self._h_loading_var = tk.StringVar(value="")
+        tk.Label(entry_row, textvariable=self._h_loading_var,
+                 font=MF_BODY, bg=M_SURFACE2, fg=M_ORANGE
+                 ).pack(side="left", padx=14)
+
+        # ── Result area ───────────────────────────────────────────────────
+        self._h_result_frame = tk.Frame(page, bg=M_BG)
+        self._h_result_frame.pack(fill="both", expand=True, padx=24, pady=8)
+
+        tk.Label(self._h_result_frame,
+                 text="Enter a city and a past date above,\n"
+                      "then click  🔍 Fetch History",
+                 font=("Segoe UI", 14), bg=M_BG, fg=M_TEXT2, justify="center"
+                 ).pack(expand=True)
+
+    # ── Historical helpers ────────────────────────────────────────────────────
+
+    def _hist_fetch(self):
+        city = self._h_city_var.get().strip()
+        date = self._h_date_var.get().strip()
+
+        if not city:
+            messagebox.showwarning("Input Required", "Please enter a city name.",
+                                   parent=self.root)
+            return
+        if not date:
+            messagebox.showwarning("Input Required",
+                                   "Please enter a date in YYYY-MM-DD format.",
+                                   parent=self.root)
+            return
+
+        self._h_loading_var.set("⏳ Fetching archive data…")
+        self._h_btn.config(state="disabled")
+
+        def _worker():
+            try:
+                result = fetch_historical_weather(city, date)
+                self.root.after(0,
+                    lambda r=result: self._hist_on_success(r, city, date))
+            except ValueError as e:
+                self.root.after(0, lambda m=str(e): self._hist_on_error(m))
+            except Exception as e:
+                self.root.after(0, lambda m=str(e): self._hist_on_error(m))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _hist_on_error(self, msg: str):
+        self._h_loading_var.set("")
+        self._h_btn.config(state="normal")
+        messagebox.showerror("Error", msg, parent=self.root)
+
+    def _hist_on_success(self, result, city: str, date: str):
+        self._h_loading_var.set("")
+        self._h_btn.config(state="normal")
+
+        if result is None:
+            messagebox.showerror(
+                "Not Found",
+                f"No historical data found for '{city}' on {date}.\n\n"
+                "Tips:\n  • Check city spelling\n"
+                "  • Add country code: London, GB\n"
+                "  • Check your internet connection",
+                parent=self.root
+            )
+            return
+
+        self._hist_render(result)
+
+    def _hist_render(self, r: dict):
+        """Render result tiles into the result frame."""
+        for w in self._h_result_frame.winfo_children():
+            w.destroy()
+
+        city_full = f"{r['city']}, {r['country']}"
+
+        # Header
+        tk.Label(self._h_result_frame,
+                 text=f"📍  {city_full}",
+                 font=("Segoe UI", 22, "bold"),
+                 bg=M_BG, fg=M_ACCENT
+                 ).pack(pady=(20, 2))
+        tk.Label(self._h_result_frame,
+                 text=f"📅  {r['date']}",
+                 font=("Segoe UI", 13),
+                 bg=M_BG, fg=M_TEXT2
+                 ).pack(pady=(0, 14))
+
+        ttk.Separator(self._h_result_frame, orient="horizontal"
+                      ).pack(fill="x", padx=40, pady=(0, 14))
+
+        def _tile(parent, icon, label, value, color):
+            f = tk.Frame(parent, bg=M_SURFACE2, padx=28, pady=18)
+            f.pack(side="left", padx=12)
+            tk.Label(f, text=icon,  font=("Segoe UI", 26),
+                     bg=M_SURFACE2, fg=color).pack()
+            tk.Label(f, text=label, font=MF_SMALL,
+                     bg=M_SURFACE2, fg=M_TEXT2).pack(pady=(4, 0))
+            tk.Label(f, text=value, font=("Segoe UI", 18, "bold"),
+                     bg=M_SURFACE2, fg=color).pack()
+
+        def _fmt(v, unit):
+            return f"{v:.1f} {unit}" if v is not None else "N/A"
+
+        # Temperature row
+        temp_row = tk.Frame(self._h_result_frame, bg=M_BG)
+        temp_row.pack(pady=4)
+        _tile(temp_row, "🔺", "Max Temp",  _fmt(r["temp_max"],  "°C"), M_RED)
+        _tile(temp_row, "🔻", "Min Temp",  _fmt(r["temp_min"],  "°C"), M_ACCENT)
+        _tile(temp_row, "🌡️", "Avg Temp",  _fmt(r["temp_avg"],  "°C"), M_ACCENT2)
+
+        ttk.Separator(self._h_result_frame, orient="horizontal"
+                      ).pack(fill="x", padx=40, pady=10)
+
+        # Extra metrics row
+        extra_row = tk.Frame(self._h_result_frame, bg=M_BG)
+        extra_row.pack(pady=4)
+        _tile(extra_row, "🌧️", "Precipitation",
+              _fmt(r["precipitation"],  "mm"),   M_ACCENT)
+        _tile(extra_row, "💨", "Max Wind Speed",
+              _fmt(r["windspeed_max"],  "km/h"), M_ORANGE)
+        _tile(extra_row, "☀️", "Sunshine",
+              _fmt(r["sunshine_hours"], "hrs"),  "#ffcc00")
 
 
 # =============================================================================

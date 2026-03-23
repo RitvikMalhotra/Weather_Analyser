@@ -205,7 +205,8 @@ def launch_cli():
     Launch the text-based command-line interface.
     Useful for environments without a display or for quick testing.
     """
-    from api      import fetch_weather, get_weather_emoji, get_wind_direction
+    from api      import fetch_weather, get_weather_emoji, get_wind_direction, \
+                         fetch_historical_weather
     from storage  import save_weather, get_all_cities, get_record_count
     from analysis import (
         get_hottest_day, get_coldest_day, compare_cities,
@@ -262,6 +263,7 @@ def launch_cli():
   [3]  Show Hottest / Coldest Day
   [4]  City Statistics Summary
   [5]  List All Stored Cities
+  [6]  Historical Weather by Date
   [0]  Exit
   ─────────────────────────────────────────""")
 
@@ -378,13 +380,53 @@ def launch_cli():
                 else:
                     print("\n  📭 No weather data stored yet.")
 
+            # ── Option 6: Historical Weather by Date ──
+            elif choice == "6":
+                city = input("\n  Enter city name (optionally: City, CC  e.g. Paris, FR): ").strip()
+                if not city:
+                    print("  [!] City name cannot be empty.")
+                    continue
+                date = input("  Enter date (YYYY-MM-DD, must be a past date): ").strip()
+                if not date:
+                    print("  [!] Date cannot be empty.")
+                    continue
+
+                print(f"\n  ⏳ Fetching historical weather for '{city}' on {date}…")
+                try:
+                    result = fetch_historical_weather(city, date)
+                    if result is None:
+                        print("  ❌ Could not retrieve data. "
+                              "Check city spelling, add country code, "
+                              "or try a different date.")
+                    else:
+                        def _fv(v, unit):
+                            return f"{v:.1f} {unit}" if v is not None else "N/A"
+
+                        print(f"""
+  ┌─────────────────────────────────────────────┐
+  │  📅  Historical Weather
+  ├─────────────────────────────────────────────┤
+  │  City          : {result['city']}, {result['country']}
+  │  Date          : {result['date']}
+  ├─────────────────────────────────────────────┤
+  │  🔺 Max Temp   : {_fv(result['temp_max'], '°C')}
+  │  🔻 Min Temp   : {_fv(result['temp_min'], '°C')}
+  │  🌡️  Avg Temp  : {_fv(result['temp_avg'], '°C')}
+  ├─────────────────────────────────────────────┤
+  │  🌧️  Precipitation : {_fv(result['precipitation'], 'mm')}
+  │  💨 Max Wind       : {_fv(result['windspeed_max'], 'km/h')}
+  │  ☀️  Sunshine       : {_fv(result['sunshine_hours'], 'hrs')}
+  └─────────────────────────────────────────────┘""")
+                except ValueError as e:
+                    print(f"  ❌ Invalid input: {e}")
+
             # ── Option 0: Exit ──
             elif choice == "0":
                 print("\n  Goodbye! 👋\n")
                 sys.exit(0)
 
             else:
-                print("\n  [!] Invalid choice. Enter 0-5.")
+                print("\n  [!] Invalid choice. Enter 0-6.")
 
     main_menu()
 

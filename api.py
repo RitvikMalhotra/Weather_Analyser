@@ -22,6 +22,12 @@ GEO_URL = "https://api.openweathermap.org/geo/1.0/direct"
 # Weather by coordinates endpoint (most accurate — no ambiguity)
 WEATHER_BY_COORD_URL = "https://api.openweathermap.org/data/2.5/weather"
 
+# ── Open-Meteo (free, no API key needed) ──────────────────────────────────────
+# Geocoding: city name → lat/lon (used for historical queries)
+OPENMETEO_GEO_URL  = "https://geocoding-api.open-meteo.com/v1/search"
+# Historical weather archive
+OPENMETEO_HIST_URL = "https://archive-api.open-meteo.com/v1/archive"
+
 
 # -----------------------------------------------------------------------------
 # Function: _resolve_city_coordinates
@@ -410,3 +416,166 @@ def get_weather_emoji(condition: str) -> str:
         "Tornado":      "🌪️",
     }
     return emoji_map.get(condition, "🌡️")   # Default emoji if unknown
+
+
+# =============================================================================
+# ── HISTORICAL WEATHER  (Open-Meteo — free, no API key required) ─────────────
+# =============================================================================
+
+def _openmeteo_geocode(city_query: str):
+    """
+    Resolve a city name using the Open-Meteo Geocoding API (no key needed).
+
+    Args:
+        city_query (str): City name, optionally with country code "City, CC"
+
+    Returns:
+        dict with keys {name, country, lat, lon} or None on failure.
+    """
+    parts     = [p.strip() for p in city_query.split(",")]
+    city_part = parts[0]
+    country_hint = parts[1].upper() if len(parts) >= 2 else None
+
+    params = {"name": city_part, "count": 10, "language": "en", "format": "json"}
+    try:
+        r = requests.get(OPENMETEO_GEO_URL, params=params, timeout=10)
+        if r.status_code != 200:
+            print(f"[ERROR] Open-Meteo geocoding HTTP {r.status_code}")
+            return None
+        data = r.json()
+        results = data.get("results") or []
+        if not results:
+            return None
+
+        # If user gave a country hint, prefer that country
+        if country_hint:
+            for res in results:
+                if res.get("country_code", "").upper() == country_hint:
+                    return {
+                        "name":    res.get("name", city_part),
+                        "country": res.get("country_code", ""),
+                        "lat":     res["latitude"],
+                        "lon":     res["longitude"],
+                    }
+        best = results[0]
+        return {
+            "name":    best.get("name", city_part),
+            "country": best.get("country_code", ""),
+            "lat":     best["latitude"],
+            "lon":     best["longitude"],
+        }
+    except Exception as e:
+        print(f"[ERROR] Open-Meteo geocoding failed: {e}")
+        return None
+
+
+def fetch_historical_weather(city_query: str, date_str: str) -> dict | None:
+    """
+    Fetch historical weather for a city on a specific date.
+
+    Uses the free Open-Meteo Archive API — no API key required.
+
+    Args:
+        city_query (str): City name e.g. "London" or "London, GB"
+        date_str   (str): Date in YYYY-MM-DD format e.g. "2024-06-15"
+
+    Returns:
+        dict with keys:
+            city, country, date,
+            temp_max, temp_min, temp_avg,
+            precipitation, windspeed_max, sunshine_hours
+        or None on failure.
+
+    Raises:
+        ValueError: if date_str format is invalid or date is in the future.
+    """
+    from datetime import date, datetime, timedelta
+
+    # ── Validate date ──────────────────────────────────────────────────────
+    try:
+        query_date = datetime.strptime(date_str.strip(), "%Y-%m-%d").date()
+    except ValueError:
+        raise ValueError(
+            f"Invalid date format '{date_str}'. Use YYYY-MM-DD (e.g. 2024-06-15).")
+
+    today = date.today()
+    if query_date >= today:
+        raise ValueError(
+            f"Date '{date_str}' is today or in the future. "
+            "Historical data is only available for past dates.")
+
+    earliest = date(1940, 1, 1)
+    if query_date < earliest:
+        raise ValueError(
+            f"Date '{date_str}' is too far in the past. "
+            "Open-Meteo archive starts from 1940-01-01.")
+
+    # ── Geocode city ────────────────────────────────────────────────────────
+    geo = _openmeteo_geocode(city_query)
+    if geo is None:
+        return None
+
+    lat, lon = geo["lat"], geo["lon"]
+    ds       = date_str.strip()
+
+    # ── Fetch archive data ──────────────────────────────────────────────────
+    params = {
+        "latitude":   lat,
+        "longitude":  lon,
+        "start_date": ds,
+        "end_date":   ds,
+        "daily": ",".join([
+            "temperature_2m_max",
+            "temperature_2m_min",
+            "temperature_2m_mean",
+            "precipitation_sum",
+            "windspeed_10m_max",
+            "sunshine_duration",
+        ]),
+        "timezone": "auto",
+    }
+
+    try:
+        r = requests.get(OPENMETEO_HIST_URL, params=params, timeout=15)
+        if r.status_code != 200:
+            print(f"[ERROR] Open-Meteo archive HTTP {r.status_code}: {r.text[:200]}")
+            return None
+
+        data   = r.json()
+        daily  = data.get("daily", {})
+        dates  = daily.get("time", [])
+
+        if not dates:
+            return None
+
+        def _first(key, default=None):
+            vals = daily.get(key, [])
+            v    = vals[0] if vals else None
+            return v if v is not None else default
+
+        temp_max  = _first("temperature_2m_max")
+        temp_min  = _first("temperature_2m_min")
+        temp_mean = _first("temperature_2m_mean")
+
+        # Compute average from max/min if mean not provided
+        if temp_mean is None and temp_max is not None and temp_min is not None:
+            temp_mean = round((temp_max + temp_min) / 2, 1)
+
+        sunshine_s = _first("sunshine_duration", 0)
+        sunshine_h = round(sunshine_s / 3600, 1) if sunshine_s else 0.0
+
+        return {
+            "city":           geo["name"],
+            "country":        geo["country"],
+            "date":           ds,
+            "temp_max":       temp_max,
+            "temp_min":       temp_min,
+            "temp_avg":       temp_mean,
+            "precipitation":  _first("precipitation_sum", 0),
+            "windspeed_max":  _first("windspeed_10m_max", 0),
+            "sunshine_hours": sunshine_h,
+        }
+
+    except Exception as e:
+        print(f"[ERROR] fetch_historical_weather failed: {e}")
+        return None

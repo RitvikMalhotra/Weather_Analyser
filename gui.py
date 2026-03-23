@@ -20,7 +20,8 @@ import pandas as pd              # For data operations in the Data Log tab
 
 # Import our custom modules
 from api      import (fetch_weather, fetch_weather_by_coords,
-                       get_all_city_matches, get_weather_emoji, get_wind_direction)
+                       get_all_city_matches, get_weather_emoji, get_wind_direction,
+                       fetch_historical_weather)
 from storage  import save_weather, load_all_data, get_all_cities, get_record_count
 from analysis import (
     get_hottest_day, get_coldest_day, compare_cities,
@@ -204,6 +205,7 @@ class WeatherApp:
         self.tab_trends   = ttk.Frame(self.notebook)
         self.tab_analysis = ttk.Frame(self.notebook)
         self.tab_data     = ttk.Frame(self.notebook)
+        self.tab_history  = ttk.Frame(self.notebook)
 
         # Add tabs to notebook
         self.notebook.add(self.tab_current,  text="  🌤️  Current Weather  ")
@@ -211,6 +213,7 @@ class WeatherApp:
         self.notebook.add(self.tab_trends,   text="  📈  Trends & Charts  ")
         self.notebook.add(self.tab_analysis, text="  📊  Analysis  ")
         self.notebook.add(self.tab_data,     text="  📋  Data Log  ")
+        self.notebook.add(self.tab_history,  text="  📅  Historical  ")
 
         # Build each tab content
         self._build_current_weather_tab()
@@ -218,6 +221,7 @@ class WeatherApp:
         self._build_trends_tab()
         self._build_analysis_tab()
         self._build_data_tab()
+        self._build_history_tab()
 
     # =========================================================================
     # ── TAB 1: Current Weather ────────────────────────────────────────────────
@@ -1216,6 +1220,177 @@ class WeatherApp:
         """Update the status bar message and record count."""
         self.status_var.set(f"  {message}")
         self.status_count_var.set(f"CSV Records: {get_record_count()}")
+
+    # =========================================================================
+    # ── TAB 6: Historical Weather ─────────────────────────────────────────────
+    # =========================================================================
+
+    def _build_history_tab(self):
+        """Build the Historical Weather tab (Open-Meteo archive, free)."""
+        tab = self.tab_history
+
+        # ── Input row ────────────────────────────────────────────────────────
+        inp = tk.Frame(tab, bg=FRAME_COLOR, pady=12)
+        inp.pack(fill="x", padx=15, pady=(10, 5))
+
+        tk.Label(inp, text="🏙️  City:",
+                 font=FONT_HEADER, bg=FRAME_COLOR, fg=HIGHLIGHT_COLOR
+                 ).pack(side="left", padx=(15, 6))
+
+        self.hist_city_var = tk.StringVar()
+        ttk.Entry(inp, textvariable=self.hist_city_var,
+                  font=FONT_BODY, width=22
+                  ).pack(side="left", ipady=4, padx=(0, 14))
+
+        tk.Label(inp, text="📅  Date (YYYY-MM-DD):",
+                 font=FONT_HEADER, bg=FRAME_COLOR, fg=HIGHLIGHT_COLOR
+                 ).pack(side="left", padx=(0, 6))
+
+        self.hist_date_var = tk.StringVar()
+        date_entry = ttk.Entry(inp, textvariable=self.hist_date_var,
+                               font=FONT_BODY, width=14)
+        date_entry.pack(side="left", ipady=4, padx=(0, 12))
+        # default to yesterday
+        from datetime import date, timedelta
+        date_entry.insert(0, (date.today() - timedelta(days=1)).isoformat())
+
+        self.hist_btn = ttk.Button(inp, text="🔍  Fetch History",
+                                   command=self._fetch_history)
+        self.hist_btn.pack(side="left", padx=4)
+
+        self.hist_loading_var = tk.StringVar(value="")
+        tk.Label(inp, textvariable=self.hist_loading_var,
+                 font=FONT_SMALL, bg=FRAME_COLOR, fg=WARNING_COLOR
+                 ).pack(side="left", padx=10)
+
+        # ── Info banner ───────────────────────────────────────────────────────
+        banner = tk.Frame(tab, bg="#0f3460", height=26)
+        banner.pack(fill="x", padx=15, pady=(0, 4))
+        banner.pack_propagate(False)
+        tk.Label(banner,
+                 text="  ℹ️  Powered by Open-Meteo Archive API  •  "
+                      "Free, no API key  •  Data available from 1940 onwards",
+                 font=FONT_SMALL, bg="#0f3460", fg=HIGHLIGHT_COLOR, anchor="w"
+                 ).pack(side="left", padx=8)
+
+        # ── Result card ───────────────────────────────────────────────────────
+        self.hist_card = tk.Frame(tab, bg=FRAME_COLOR)
+        self.hist_card.pack(fill="both", expand=True, padx=15, pady=6)
+
+        tk.Label(self.hist_card,
+                 text="Enter a city and a past date above, then click\n"
+                      "🔍 Fetch History to see the archived weather data.",
+                 font=("Segoe UI", 13), bg=FRAME_COLOR, fg="#555577",
+                 justify="center"
+                 ).pack(expand=True)
+
+    def _fetch_history(self):
+        """Validate input and kick off background historical fetch."""
+        city = self.hist_city_var.get().strip()
+        date = self.hist_date_var.get().strip()
+
+        if not city:
+            messagebox.showwarning("Input Required", "Please enter a city name.")
+            return
+        if not date:
+            messagebox.showwarning("Input Required",
+                                   "Please enter a date in YYYY-MM-DD format.")
+            return
+
+        self.hist_loading_var.set("⏳ Fetching archive…")
+        self.hist_btn.state(["disabled"])
+
+        def _worker():
+            try:
+                result = fetch_historical_weather(city, date)
+                self.root.after(0, lambda: self._on_history_fetched(result, city, date))
+            except ValueError as e:
+                self.root.after(0, lambda err=str(e): self._on_history_error(err))
+            except Exception as e:
+                self.root.after(0, lambda err=str(e): self._on_history_error(err))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_history_error(self, msg: str):
+        self.hist_loading_var.set("")
+        self.hist_btn.state(["!disabled"])
+        messagebox.showerror("Error", msg)
+
+    def _on_history_fetched(self, result, city, date):
+        self.hist_loading_var.set("")
+        self.hist_btn.state(["!disabled"])
+
+        if result is None:
+            messagebox.showerror(
+                "Not Found",
+                f"Could not retrieve historical data for '{city}' on {date}.\n\n"
+                "Tips:\n"
+                "  • Check city spelling\n"
+                "  • Add country code: London, GB\n"
+                "  • Check your internet connection"
+            )
+            return
+
+        self._render_history_card(result)
+        self._update_status(
+            f"📅 Historical data loaded — {result['city']}, "
+            f"{result['country']} on {result['date']}")
+
+    def _render_history_card(self, r: dict):
+        """Render historical weather result into the card frame."""
+        for w in self.hist_card.winfo_children():
+            w.destroy()
+
+        city_full = f"{r['city']}, {r['country']}"
+
+        # ── Header ────────────────────────────────────────────────────────
+        tk.Label(self.hist_card,
+                 text=f"📍  {city_full}",
+                 font=("Segoe UI", 18, "bold"),
+                 bg=FRAME_COLOR, fg=HIGHLIGHT_COLOR
+                 ).pack(pady=(18, 2))
+
+        tk.Label(self.hist_card,
+                 text=f"📅  {r['date']}",
+                 font=("Segoe UI", 12),
+                 bg=FRAME_COLOR, fg="#aaaaaa"
+                 ).pack(pady=(0, 12))
+
+        ttk.Separator(self.hist_card, orient="horizontal").pack(fill="x", padx=30)
+
+        # ── Temperature row ───────────────────────────────────────────────
+        temp_row = tk.Frame(self.hist_card, bg=FRAME_COLOR)
+        temp_row.pack(pady=18)
+
+        def _tile(parent, icon, label, value, color):
+            f = tk.Frame(parent, bg="#1e2240", padx=22, pady=14)
+            f.pack(side="left", padx=10)
+            tk.Label(f, text=icon, font=("Segoe UI", 22),
+                     bg="#1e2240", fg=color).pack()
+            tk.Label(f, text=label, font=FONT_SMALL,
+                     bg="#1e2240", fg="#888888").pack(pady=(2, 0))
+            tk.Label(f, text=value, font=("Segoe UI", 16, "bold"),
+                     bg="#1e2240", fg=color).pack()
+
+        def _fmt_t(v):
+            return f"{v:.1f} °C" if v is not None else "N/A"
+
+        _tile(temp_row, "🔺", "Max Temp",  _fmt_t(r["temp_max"]),  BUTTON_COLOR)
+        _tile(temp_row, "🔻", "Min Temp",  _fmt_t(r["temp_min"]),  "#00b4d8")
+        _tile(temp_row, "🌡️", "Avg Temp",  _fmt_t(r["temp_avg"]),  "#4caf50")
+
+        ttk.Separator(self.hist_card, orient="horizontal").pack(fill="x", padx=30)
+
+        # ── Extra metrics ─────────────────────────────────────────────────
+        extra_row = tk.Frame(self.hist_card, bg=FRAME_COLOR)
+        extra_row.pack(pady=14)
+
+        _tile(extra_row, "🌧️", "Precipitation",
+              f"{r['precipitation']:.1f} mm", "#00b4d8")
+        _tile(extra_row, "💨", "Max Wind",
+              f"{r['windspeed_max']:.1f} km/h", WARNING_COLOR)
+        _tile(extra_row, "☀️", "Sunshine",
+              f"{r['sunshine_hours']:.1f} hrs", "#ffcc00")
 
 
 # =============================================================================
